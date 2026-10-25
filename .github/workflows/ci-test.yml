@@ -1,0 +1,17 @@
+name: 诊断测试
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ci-test.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 打印环境
+        run: |
+          echo "ubuntu runner OK"
+          python3 --version
