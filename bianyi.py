@@ -29,6 +29,15 @@ import subprocess
 import sys
 import tempfile
 
+# 部分终端（如 GitHub Actions 的 cp1252 控制台）编码打不出中文，
+# 降级为替换字符，避免 print 中文直接崩溃；本地 GBK/UTF-8 终端不受影响
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENTRY = os.path.join(HERE, "app.py")
 EXE_NAME = "通用答题工具.exe"

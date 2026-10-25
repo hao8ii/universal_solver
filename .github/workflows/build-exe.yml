@@ -21,6 +21,9 @@ jobs:
     name: Windows打包
     runs-on: windows-latest
     timeout-minutes: 240
+    env:
+      # 云端控制台默认 cp1252，强制 UTF-8 让中文日志正常显示
+      PYTHONUTF8: '1'
     permissions:
       contents: write
     steps:
