@@ -1,0 +1,7 @@
+# 换行符规范：仓库内统一 LF，Windows 检出时恢复
+* text=auto
+# cmd 只认 CRLF 的 bat（GBK 编码由 git 原样保留，不做编码转换）
+*.bat text eol=crlf
+# 二进制文件
+*.png binary
+*.ico binary

@@ -1,0 +1,11 @@
+# Python 虚拟环境与缓存
+.venv/
+__pycache__/
+*.py[cod]
+
+# 本地打包产物（GitHub Actions 会自动打包）
+build/
+
+# 运行时生成（exe/程序同目录会重新生成）
+config.json
+browser_profile/
