@@ -44,6 +44,13 @@ jobs:
       - name: 运行题库解析测试
         run: python -m unittest tests.test_bank -v
 
+      # 页面识别集成测试（本地模拟站点 + 无头 Chrome）。
+      # 云端环境偶有浏览器/端口抖动，因此不阻断打包，只作为质量信号。
+      - name: 运行页面识别集成测试（不阻断打包）
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python -m unittest tests.test_engine -v
+
       # Nuitka 的编译缓存（clcache/下载缓存），第二次构建明显变快
       - name: 恢复Nuitka编译缓存
         uses: actions/cache@v4

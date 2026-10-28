@@ -5,7 +5,15 @@ __pycache__/
 
 # 本地打包产物（GitHub Actions 会自动打包）
 build/
+build_log.txt
 
 # 运行时生成（exe/程序同目录会重新生成）
 config.json
 browser_profile/
+page_diag.png
+
+# 题库文件：可能含真实考题，默认不入库；需要公开示例题库时自行删除本行
+*.xlsx
+
+# 本地工具数据（编辑器/助手的工作记录）
+.workbuddy-ai/

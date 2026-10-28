@@ -166,6 +166,86 @@ class EngineTests(unittest.TestCase):
         results = eng.answer_current_page(groups)
         self.assertEqual(results[0]["status"], "answered", results)
 
+    def test_structural_div_options(self):
+        """class 名不含 opt/option 等关键词的纯 div 选项，靠结构识别。"""
+        eng = self.make_engine("/divopt", ocr=False)
+        eng._launch_browser()
+        eng._open_url()
+        groups = eng.scan_page(strict=True)
+        self.assertEqual(len(groups), 1)
+        results = eng.answer_current_page(groups)
+        self.assertEqual(results[0]["status"], "answered", results)
+        states = [eng._state_tag(o["id"], groups[0].get("frame") or []) for o in groups[0]["options"]]
+        self.assertEqual(states, [False, True, False, False])
+        # 选中后页面给该项加了 selected 类，选项组不能被拆成“已选 1 + 未选 3”
+        again = eng.scan_page(strict=True)
+        self.assertEqual(len(again), 1, [g.get("stem") for g in again])
+        self.assertEqual(len(again[0]["options"]), 4)
+
+    def test_anchor_options(self):
+        """选项是 <a> 链接。"""
+        eng = self.make_engine("/anchors", ocr=False)
+        eng._launch_browser()
+        eng._open_url()
+        groups = eng.scan_page(strict=True)
+        self.assertEqual(len(groups), 1)
+        results = eng.answer_current_page(groups)
+        self.assertEqual(results[0]["status"], "answered", results)
+        states = [eng._state_tag(o["id"], groups[0].get("frame") or []) for o in groups[0]["options"]]
+        self.assertEqual(states, [False, True, False, False])
+
+    def test_select_options(self):
+        """原生 <select> 下拉框。"""
+        eng = self.make_engine("/select", ocr=False)
+        eng._launch_browser()
+        eng._open_url()
+        groups = eng.scan_page(strict=True)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["qtype"], "select")
+        self.assertEqual(len(groups[0]["options"]), 4)
+        results = eng.answer_current_page(groups)
+        self.assertEqual(results[0]["status"], "answered", results)
+        self.assertEqual(
+            eng.driver.execute_script("return document.getElementById('ans-sel').value"), "A"
+        )
+
+    def test_navigation_not_mistaken_for_options(self):
+        """顶部导航不能被当成一组选项。"""
+        eng = self.make_engine("/noise", ocr=False)
+        eng._launch_browser()
+        eng._open_url()
+        groups = eng.scan_page(strict=True)
+        self.assertEqual(len(groups), 1, [g.get("stem") for g in groups])
+        self.assertIn("全面依法治国", groups[0]["stem"])
+        results = eng.answer_current_page(groups)
+        self.assertEqual(results[0]["status"], "answered", results)
+
+    def test_entry_form_then_answer(self):
+        """“姓名 + 进入考试”的入场页要能自动填名并进入。"""
+        eng = self.make_engine("/entry")
+        eng.config.username = "张三"
+        eng.run()
+        self.assertIn("/quiz", eng.driver.current_url)
+        logs = "\n".join(m for _, m in self.logs)
+        self.assertIn("入场表单", logs)
+        self.assertIn("检测到 3 道题", logs)
+
+    def test_answer_card_jump(self):
+        """一题一页、没有“下一题”按钮，只有右侧答题卡 → 靠题号跳题。"""
+        eng = self.make_engine("/card", ocr=False)
+        eng.run()
+        logs = "\n".join(m for _, m in self.logs)
+        self.assertIn("答题卡：跳到第 2 题", logs)
+        self.assertIn("答题卡：跳到第 3 题", logs)
+        # 三题都答过（答题卡上 3 个题号都带 no-done）
+        done = eng.driver.execute_script(
+            "return Array.from(document.querySelectorAll('.no')).map(function(e){return e.classList.contains('no-done')})"
+        )
+        self.assertEqual(done, [True, True, True])
+        # 答题卡题号不能被当成选项
+        groups = eng.scan_page(strict=True)
+        self.assertEqual(len(groups), 1, [g.get("stem") for g in groups])
+
     def test_auto_next_stops_before_submit(self):
         eng = self.make_engine("/page1")
         eng.run()

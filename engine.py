@@ -104,6 +104,7 @@ class UniversalEngine:
         self._ocr_announced = False
         self._ocr_warned = False
         self._seen_frames: List[Tuple[int, ...]] = []
+        self._visited_map_nos = set()
         self._last_error = ""
 
     # ------------------------------------------------------------------
@@ -170,7 +171,7 @@ class UniversalEngine:
                 opts.binary_location = exe
             self._common_options(opts, profile, headless)
             self.log("启动 Edge%s…" % ("（无头）" if headless else ""))
-            self.driver = webdriver.Edge(options=opts)
+            self.driver = self._fast_driver("edge", opts) or self._launch_with_fallback("edge", opts)
         else:
             from selenium.webdriver.chrome.options import Options as ChromeOptions
             opts = ChromeOptions()
@@ -180,7 +181,7 @@ class UniversalEngine:
                 self.log("Chrome 路径：%s" % exe)
             self._common_options(opts, profile, headless)
             self.log("启动 Chrome%s…" % ("（无头）" if headless else ""))
-            self.driver = webdriver.Chrome(options=opts)
+            self.driver = self._fast_driver("chrome", opts) or self._launch_with_fallback("chrome", opts)
 
         try:
             self.driver.set_page_load_timeout(60)
@@ -195,6 +196,96 @@ class UniversalEngine:
         except Exception:
             pass
         self.log("浏览器已启动。", "ok")
+
+    @staticmethod
+    def _cached_driver_path(kind: str, want: Optional[str] = None) -> Optional[str]:
+        """在 Selenium 缓存目录里找已下载的驱动，供无法联网时兜底。
+        传入 want（浏览器版本号）时，只返回主版本一致的驱动，避免版本不匹配。"""
+        name = "msedgedriver" if kind == "edge" else "chromedriver"
+        want_major = 0
+        if want:
+            try:
+                want_major = int(str(want).split(".")[0])
+            except Exception:
+                want_major = 0
+        homes = [
+            os.path.join(os.path.expanduser("~"), ".cache", "selenium"),
+            os.path.join(os.environ.get("LOCALAPPDATA") or "", "selenium"),
+            os.path.join(os.environ.get("USERPROFILE") or "", ".cache", "selenium"),
+        ]
+        best: Optional[str] = None
+        best_key = (-1,)
+        for root in homes:
+            base = os.path.join(root, name)
+            if not root or not os.path.isdir(base):
+                continue
+            for dirpath, _dirs, files in os.walk(base):
+                for fn in files:
+                    if fn.lower() not in (name + ".exe", name):
+                        continue
+                    path = os.path.join(dirpath, fn)
+                    parts = []
+                    for piece in os.path.basename(dirpath).replace("-", ".").split("."):
+                        parts.append(int(piece) if piece.isdigit() else 0)
+                    key = tuple(parts) or (0,)
+                    if want_major and key[0] != want_major:
+                        continue
+                    if key > best_key:
+                        best_key, best = key, path
+        return best
+
+    @staticmethod
+    def _browser_version(exe: Optional[str]) -> Optional[str]:
+        """从浏览器安装路径推断版本号，如 …\\Application\\155.0.8059.85\\chrome.exe。"""
+        if not exe:
+            return None
+        try:
+            parent = os.path.basename(os.path.dirname(exe))
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", parent):
+                return parent
+        except Exception:
+            pass
+        return None
+
+    def _fast_driver(self, kind: str, opts):
+        """浏览器版本已知、本地缓存里又有同主版本驱动时，直接用，省掉联网匹配。"""
+        exe = getattr(opts, "binary_location", None)
+        ver = self._browser_version(exe)
+        if not ver:
+            return None
+        cached = self._cached_driver_path(kind, ver)
+        if not cached:
+            return None
+        try:
+            if kind == "edge":
+                from selenium.webdriver.edge.service import Service as EdgeService
+                drv = webdriver.Edge(service=EdgeService(executable_path=cached), options=opts)
+            else:
+                from selenium.webdriver.chrome.service import Service as ChromeService
+                drv = webdriver.Chrome(service=ChromeService(executable_path=cached), options=opts)
+            self.log("使用本地缓存驱动（%s）。" % os.path.basename(os.path.dirname(cached)))
+            return drv
+        except Exception as e:
+            self.log("本地缓存驱动不可用（%s），改由自动匹配。" % str(e).splitlines()[0][:70], "warn")
+            return None
+
+    def _launch_with_fallback(self, kind: str, opts):
+        """常规方式启动；失败（断网、杀软拦截 Selenium Manager）时用缓存驱动重试。"""
+        try:
+            if kind == "edge":
+                return webdriver.Edge(options=opts)
+            return webdriver.Chrome(options=opts)
+        except Exception as e:
+            cached = self._cached_driver_path(kind)
+            if not cached:
+                raise
+            first = str(e).splitlines()[0][:90] if str(e) else ""
+            self.log("自动匹配驱动失败（%s），改用本地缓存驱动：%s" % (first, cached), "warn")
+            if kind == "edge":
+                from selenium.webdriver.edge.service import Service as EdgeService
+                return webdriver.Edge(service=EdgeService(executable_path=cached), options=opts)
+            from selenium.webdriver.chrome.service import Service as ChromeService
+            return webdriver.Chrome(service=ChromeService(executable_path=cached), options=opts)
 
     @staticmethod
     def _common_options(opts, profile: str, headless: bool) -> None:
@@ -301,7 +392,7 @@ class UniversalEngine:
                         self.log("点击下一步失败：%s" % e, "warn")
                 self._sleep(2.0)
                 return self._try_generic_login(allow_step=False)
-            self.log("%s；请手动登录，程序会继续等待答题页。" % reason, "warn")
+            self.log("%s；如需登录请在浏览器中完成，程序会继续等待答题页。" % reason)
             return
 
         self.log("检测到登录框，尝试自动填写…")
@@ -351,6 +442,58 @@ class UniversalEngine:
                 self.log("登录表单已提交。", "ok")
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # 入场表单（姓名/工号 → 进入考试）
+    # ------------------------------------------------------------------
+    ENTRY_JS = """
+    var res = {clicked: false, filled: false, reason: ""};
+    try {
+      if (document.querySelector('input[type=password]')) { res.reason = "has-password"; return res; }
+      var re = /(进入考试|开始考试|开始答题|进入答题|开始测评|进入测评|开始练习|进入练习)/;
+      var btns = Array.prototype.slice.call(
+        document.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]'));
+      var btn = null;
+      for (var i = 0; i < btns.length; i++) {
+        var b = btns[i];
+        if (!b.offsetParent || b.disabled) continue;
+        var t = String(b.innerText || b.value || "").replace(/\\s+/g, "");
+        if (re.test(t)) { btn = b; break; }
+      }
+      if (!btn) { res.reason = "no-entry-button"; return res; }
+      var name = arguments[0];
+      var inputs = Array.prototype.slice.call(
+        document.querySelectorAll('input[type=text],input:not([type])'))
+        .filter(function (i) { return i.offsetParent && !i.disabled && !i.readOnly; });
+      if (inputs.length && name) {
+        var el = inputs[0];
+        el.focus();
+        el.value = name;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        res.filled = true;
+      }
+      btn.click();
+      res.clicked = true;
+    } catch (e) { res.reason = String(e); }
+    return res;
+    """
+
+    def _try_entry_form(self) -> bool:
+        """识别“姓名/工号 + 进入考试”这类入场页，自动填名并进入。"""
+        if self.driver is None:
+            return False
+        try:
+            res = self.driver.execute_script(self.ENTRY_JS, self.config.username or "")
+        except Exception as e:
+            self.log("入场表单识别失败：%s" % e, "debug")
+            return False
+        if not isinstance(res, dict) or not res.get("clicked"):
+            return False
+        self.log("检测到入场表单，已%s并点击“进入考试”。" %
+                 ("填写姓名" if res.get("filled") else "直接"), "ok")
+        self._sleep(2.5)
+        return True
 
     # ------------------------------------------------------------------
     # 页面扫描
@@ -709,6 +852,130 @@ class UniversalEngine:
             pass
         return None
 
+    def _find_map_in_frame(self, frame_path: Sequence[int], exclude_ids: Sequence[str]) -> Optional[dict]:
+        try:
+            with self._frame_context(frame_path):
+                res = self.driver.execute_script(
+                    "return window.__uat_question_map ? window.__uat_question_map(arguments[0]) : null",
+                    list(exclude_ids),
+                )
+            if res and res.get("items"):
+                res["frame"] = list(frame_path)
+                return res
+        except Exception:
+            return None
+        return None
+
+    def _map_paths(self, groups: Sequence[dict]) -> List[Tuple[int, ...]]:
+        paths: List[Tuple[int, ...]] = []
+        for g in groups:
+            p = tuple(g.get("frame") or ())
+            if p not in paths:
+                paths.append(p)
+        if () not in paths:
+            paths.append(())
+        for p in self._seen_frames:
+            if p not in paths:
+                paths.append(p)
+        return paths
+
+    def _open_answer_card(self, frame_path: Sequence[int]) -> bool:
+        """有些系统要把“答题卡”面板点开，题号列表才在 DOM 里。"""
+        js = """
+        const re = /(答题卡|题卡|题目列表|答题列表|答卷卡|答题导航)/;
+        const els = Array.from(document.querySelectorAll("button,a,div,span,[role=button]"));
+        for (const el of els) {
+          const t = (el.innerText || "").replace(/\\s+/g, "");
+          if (!t || t.length > 10 || !re.test(t)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 4 || r.height < 4) continue;
+          try { el.click(); return true; } catch (e) {}
+        }
+        return false;
+        """
+        try:
+            with self._frame_context(frame_path):
+                return bool(self.driver.execute_script(js))
+        except Exception:
+            return False
+
+    def _find_question_map(self, groups: Sequence[dict]) -> Optional[dict]:
+        exclude = []
+        for g in groups:
+            for o in g.get("options") or []:
+                if o.get("id"):
+                    exclude.append(o["id"])
+        paths = self._map_paths(groups)
+        for p in paths:
+            self._check_stop()
+            res = self._find_map_in_frame(p, exclude)
+            if res:
+                return res
+        # 面板可能是折叠的，点开“答题卡”再找一次
+        for p in paths:
+            self._check_stop()
+            if self._open_answer_card(p):
+                self._sleep(0.6)
+                for q in paths:
+                    res = self._find_map_in_frame(q, exclude)
+                    if res:
+                        self.log("已展开“答题卡”面板。")
+                        return res
+                break
+        return None
+
+    def _jump_by_map(self, groups: Sequence[dict], old_sig: str, old_url: str) -> Optional[List[dict]]:
+        """没有“下一题”按钮时，用答题卡/题号列表跳到下一道未答题。"""
+        info = self._find_question_map(groups)
+        if not info:
+            return None
+        items = info.get("items") or []
+        if len(items) < 2:
+            return None
+        cur = None
+        for i, it in enumerate(items):
+            if it.get("current"):
+                cur = i
+                break
+        if cur is not None:
+            self._visited_map_nos.add(items[cur]["no"])
+
+        # 候选顺序：明确未作答的 → 当前题之后的 → 从头开始
+        cands: List[dict] = []
+        for it in items:
+            if it.get("answered") is False and it["no"] not in self._visited_map_nos:
+                cands.append(it)
+        if cur is not None:
+            for it in items[cur + 1:]:
+                if it["no"] not in self._visited_map_nos:
+                    cands.append(it)
+        for it in items:
+            if it["no"] not in self._visited_map_nos:
+                cands.append(it)
+        # 去重且限制尝试次数，避免死循环
+        uniq: List[dict] = []
+        seen_nos = set()
+        for it in cands:
+            if it["no"] in seen_nos:
+                continue
+            seen_nos.add(it["no"])
+            uniq.append(it)
+        if not uniq:
+            return None
+
+        for it in uniq[:3]:
+            self._check_stop()
+            self.log("答题卡：跳到第 %d 题" % it["no"])
+            res = self._click_tag(it["id"], info.get("frame") or [])
+            self._visited_map_nos.add(it["no"])
+            if not res.get("ok"):
+                self.log("点击题号 %d 失败：%s" % (it["no"], res.get("error", "")), "warn")
+                continue
+            new_groups = self._wait_for_change(old_sig, old_url, timeout=8.0)
+            if new_groups:
+                return new_groups
+        return None
+
     def _signature(self, groups: Sequence[dict]) -> str:
         h = hashlib.md5()
         try:
@@ -749,6 +1016,9 @@ class UniversalEngine:
         desired = set(int(i) for i in indices if 0 <= int(i) < len(opts))
         if not desired:
             return False, "没有可点击的选项"
+        # 原生下拉框：没有可点击的选项元素，直接设置选中项
+        if group.get("qtype") == "select":
+            return self._select_option(group, sorted(desired))
         messages = []
         # 多选题先取消不该选的已选项
         if qtype == "multiple":
@@ -772,27 +1042,53 @@ class UniversalEngine:
             if cur:
                 continue
             res = self._click_tag(o.get("id"), frame)
-            if not res.get("ok") or res.get("after") is False:
-                # 回退到内部 input
-                iid = o.get("input_id")
-                if iid:
-                    res2 = self._click_tag(iid, frame)
-                    if res2.get("ok"):
-                        res = res2
+            need_retry = (not res.get("ok")) or (res.get("after") is False)
+            # 回退点击只能打向“另一个元素”（label 里的 input）。
+            # 纯 div 伪选项的 input_id 就是它自己，再点一次等于把答案取消掉。
+            iid = o.get("input_id")
+            if need_retry and iid and iid != o.get("id"):
+                res2 = self._click_tag(iid, frame)
+                if res2.get("ok"):
+                    res = res2
             if not res.get("ok"):
                 messages.append("点击第%d项失败：%s" % (i + 1, res.get("error", "")))
             self._sleep(0.12)
         # 验证
-        states = []
-        for i, o in enumerate(opts):
-            st = self._state_tag(o.get("id"), frame)
-            if st is None:
-                st = bool(o.get("checked"))
-            states.append(bool(st))
-        ok = all(states[i] for i in desired)
-        if not ok:
+        # 自定义控件点击后常会整体重绘，旧标签失效、状态读不到（None）；
+        # 这不是失败，只有明确读到“未选中”（False）才算失败。
+        states = [self._state_tag(o.get("id"), frame) for o in opts]
+        failed = [i for i in desired if states[i] is False]
+        ok = not failed
+        if failed:
             messages.append("选择后校验未通过")
         return ok, "；".join(messages)
+
+    def _select_option(self, group: dict, indices: Sequence[int]) -> Tuple[bool, str]:
+        """原生 <select> 下拉框答题。"""
+        opts = group.get("options") or []
+        if self.driver is None:
+            return False, "浏览器未启动"
+        if not indices:
+            return False, "没有可选项"
+        i = int(indices[0])
+        if not (0 <= i < len(opts)):
+            return False, "选项下标越界"
+        o = opts[i]
+        msg = ""
+        if len(indices) > 1:
+            msg = "下拉框只能单选，已选择第一项"
+        try:
+            with self._frame_context(group.get("frame") or []):
+                res = self.driver.execute_script(
+                    "return window.__uat_select_option(arguments[0], arguments[1], arguments[2]);",
+                    o.get("id"), o.get("index"), o.get("value"),
+                )
+        except Exception as e:
+            return False, "下拉选择失败：%s" % e
+        ok = bool(res and res.get("ok"))
+        if not ok:
+            msg = (res or {}).get("error", "下拉选择失败")
+        return ok, msg
 
     def _answer_group(self, index: int, total: int, group: dict) -> dict:
         g = self._prepare_group(group)
@@ -921,7 +1217,9 @@ class UniversalEngine:
             total_answered += sum(1 for r in results if r.get("status") == "answered")
             self._check_stop()
 
-            # 有些网站选完最后一项会自动跳下一页
+            # 有些网站选完最后一项会自动跳下一页；先等它跳完再判断，
+            # 否则会在自动跳转前看到旧题、又去点“下一题”，结果跳过一题。
+            self._sleep(0.6)
             after_groups = self.scan_page()
             if after_groups and self._signature(after_groups) != old_sig:
                 self.log("检测到页面已自动切换。", "info")
@@ -944,7 +1242,13 @@ class UniversalEngine:
                     self.log("检测到页面已自动切换。", "info")
                     groups = late_groups
                     continue
-                self.log("本页已答完，没有找到“下一题/下一页”。请手动检查并提交。", "ok")
+                # 没有“下一题”按钮：试试左侧答题卡/题号列表
+                jumped = self._jump_by_map(groups, old_sig, old_url)
+                if jumped:
+                    self.log("检测到页面已自动切换。", "info")
+                    groups = jumped
+                    continue
+                self.log("本页已答完，没有找到“下一题/下一页”或答题卡。请手动检查并提交。", "ok")
                 self.status("已到最后一页，请手动提交")
                 return
             self.log("点击：%s" % (nxt.get("text") or "下一页"))
@@ -1038,6 +1342,8 @@ class UniversalEngine:
                 self._launch_browser()
             self._open_url()
             self._try_generic_login()
+            # 有些系统不是登录，而是“姓名/工号 → 进入考试”的入场页
+            self._try_entry_form()
             groups = self._wait_for_quiz()
             if not groups:
                 return

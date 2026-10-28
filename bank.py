@@ -115,7 +115,23 @@ def split_answer_text(answer: object) -> List[str]:
     return parts if parts else [s]
 
 
+JUDGE_TRUE_SYMBOLS = ("√", "✓", "✔", "☑")
+JUDGE_FALSE_SYMBOLS = ("×", "✗", "✘", "☒")
+JUDGE_TRUE_WORDS = ("对", "正确", "是")
+JUDGE_FALSE_WORDS = ("错", "错误", "否")
+
+
 def judgment_value(text: object) -> Optional[str]:
+    # 纯符号选项（√ × 等）会被 normalize_text 当标点过滤掉，必须先按原文判断，
+    # 否则网页用“√ / ×”展示判断题时会识别不出答案。
+    compact = re.sub(
+        r"[\s。.、，,；;：:（）()\[\]【】\"'“”‘’]", "", clean_display(text)
+    )
+    if compact in JUDGE_TRUE_SYMBOLS or compact in JUDGE_TRUE_WORDS:
+        return "正确"
+    if compact in JUDGE_FALSE_SYMBOLS or compact in JUDGE_FALSE_WORDS:
+        return "错误"
+
     s = normalize_text(text)
     if not s:
         return None
@@ -434,17 +450,25 @@ class Bank:
             return MatchResult(None, reason="题库中没有相近题目")
 
         page_opts = [strip_option_prefix(x) for x in (page_options or []) if clean_display(x)]
-        best: Optional[Tuple[float, float, int]] = None
+        best: Optional[Tuple[float, float, int, int]] = None
         for idx in candidate_ids:
             q = self.questions[idx]
             score = _ratio(norm, q.norm_stem)
             opt_score = self._option_set_score(q, page_opts) if page_opts else 0.0
             combined = score + (opt_score * 0.035 if page_opts else 0.0)
-            if best is None or combined > best[0]:
-                best = (combined, score, idx)
+            # 页面题干常带题号前缀，两条相近题目会打出同样的分数。
+            # 此时优先“题库题干完整出现在页面题干里”且更长的那个，
+            # 否则“党内监督的重点对象是（ ）”会抢走“……是全体党员。”这道判断题。
+            contained = len(q.norm_stem) if q.norm_stem and q.norm_stem in norm else 0
+            if best is None:
+                best = (combined, score, contained, idx)
+            elif combined > best[0] + 0.5:
+                best = (combined, score, contained, idx)
+            elif abs(combined - best[0]) <= 0.5 and contained > best[2]:
+                best = (combined, score, contained, idx)
         if best is None:
             return MatchResult(None, reason="题库中没有相近题目")
-        combined, score, idx = best
+        combined, score, _contained, idx = best
         q = self.questions[idx]
         opt_score = self._option_set_score(q, page_opts) if page_opts else 0.0
         # 精确题干直接通过；否则要求模糊分数线

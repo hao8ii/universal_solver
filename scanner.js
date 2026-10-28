@@ -211,6 +211,12 @@ window.__uatScanResult = (function () {
     if (p === "true") return true;
     const sel = el.getAttribute && el.getAttribute("aria-selected");
     if (sel === "true") return true;
+    // 纯 div 伪选项靠 class 表示选中，如 <div class="opt selected">
+    try {
+      if (el.classList && (el.classList.contains("selected") || el.classList.contains("checked") ||
+          el.classList.contains("active") || el.classList.contains("is-selected") ||
+          el.classList.contains("is-checked"))) return true;
+    } catch (e) {}
     return false;
   }
 
@@ -262,9 +268,12 @@ window.__uatScanResult = (function () {
   function findStem(container, optionEls) {
     if (!container) return { el: null, text: "", is_container: false };
     const selectors = [
-      ".question-stem", ".stem", ".question-title", ".q-title", ".title",
+      ".question-stem", ".stem", ".question-title", ".q-title", ".q-stem", ".title",
       ".topic", ".question-name", ".question-content", ".subject",
       ".question-text", ".exam-question", "legend", "h1", "h2", "h3", "h4", "h5", "h6",
+      // 属性模糊匹配，覆盖 qs-stem / exam_question_title / subject-txt 等命名
+      "[class*=stem]", "[id*=stem]", "[class*=subject]", "[id*=subject]",
+      "[class*=question][class*=text]", "[class*=question][class*=title]",
     ];
     let best = null;
     for (let si = 0; si < selectors.length; si++) {
@@ -489,8 +498,206 @@ window.__uatScanResult = (function () {
   roleByRoot.forEach(function (controls) {
     if (controls.length < 2 || controls.length > 30) return;
     const g = makeGroup(controls, "role");
-    if (g) groups.push(g);
+    if (g) {
+      groups.push(g);
+      controls.forEach(function (c) { usedControls.add(c.el); });
+    }
   });
+
+  // 3. 没有任何标准控件、纯 div/li 的“伪选项”
+  //    自研答题系统常见写法：<div class="opt"><span class="key">A</span><span class="txt">…</span></div>，
+  //    选项上只挂了 click 事件，既没有 input，也没有 role/aria 属性。
+  const FAKE_CLASS_RE = /(^|[\s_-])(opt|option|choice|answeritem|optionitem|selectitem|optitem|radio|checkbox)([\s_-]|$)/i;
+  function fakeKey(el) {
+    const cls = String((el && el.className) || "");
+    const m = cls.match(FAKE_CLASS_RE);
+    return m ? String(m[2] || "").toLowerCase() : "";
+  }
+  const fakeByRoot = new Map();
+  try {
+    deepQueryAll("[class]").forEach(function (el) {
+      if (!el || !el.isConnected || usedControls.has(el)) return;
+      if (/^(INPUT|LABEL|BUTTON|SELECT|TEXTAREA|OPTION|A|OPTGROUP)$/.test(el.tagName)) return;
+      if (!isVisible(el)) return;
+      try {
+        if (el.closest && el.closest("nav,header,footer,select")) return;
+      } catch (e) {}
+      const key = fakeKey(el);
+      if (!key) return;
+      // 内部还并列着同类子元素的是“选项列表容器”，不是选项本身
+      let innerSame = 0;
+      Array.from(el.children || []).forEach(function (c) {
+        if (fakeKey(c) === key) innerSame++;
+      });
+      if (innerSame >= 2) return;
+      const p = el.parentElement;
+      if (!p) return;
+      // 必须和至少一个同类兄弟并列，才说明它是一组选项中的一项
+      let sameSib = 0;
+      Array.from(p.children || []).forEach(function (c) {
+        if (c !== el && fakeKey(c) === key) sameSib++;
+      });
+      if (sameSib < 1) return;
+      const t = textOf(el);
+      if (!t || t.length > 400) return;
+      // 纯数字（1/2/3…）是答题卡题号，不是选项
+      if (/^\d{1,3}$/.test(t.trim())) return;
+      if (!fakeByRoot.has(p)) fakeByRoot.set(p, []);
+      fakeByRoot.get(p).push({ el: el });
+    });
+  } catch (e) {}
+
+  fakeByRoot.forEach(function (controls) {
+    if (controls.length < 2 || controls.length > 12) return;
+    if (controls.some(function (c) { return usedControls.has(c.el); })) return;
+    const g = makeGroup(controls, "role");
+    if (g) {
+      groups.push(g);
+      controls.forEach(function (c) { usedControls.add(c.el); });
+    }
+  });
+
+  // 4. 结构启发式：完全不看 class 名字
+  //    很多系统用 <div class="item"> / <a class="ans"> / <li> 之类命名，
+  //    只要“同一个父节点下有 2~8 个同 tag + 同 class 的兄弟、且上方有题干文字”，
+  //    就当作一组选项。前三种精确策略没结果时才启用，避免误伤。
+  const NAV_WORDS = /^(首页|主页|上一页|下一页|上一题|下一题|返回|登录|注册|退出|菜单|更多|搜索|收藏|分享|确定|取消|提交|交卷)$/;
+  // 选项一定是“可点”的：鼠标手型、或者本身就是 a/li/button、或带 onclick/tabindex/role。
+  // 用它把成绩表格、统计列表这类纯文本行挡在外面。
+  function clicky(el) {
+    if (!el) return false;
+    try {
+      const st = window.getComputedStyle(el);
+      if (st && st.cursor === "pointer") return true;
+    } catch (e) {}
+    if (/^(A|LI|BUTTON|LABEL|SUMMARY|DT|DD)$/.test(el.tagName)) return true;
+    try {
+      if (el.hasAttribute("onclick") || el.hasAttribute("tabindex") || el.getAttribute("role")) return true;
+      const p = el.parentElement;
+      if (p && (p.hasAttribute("onclick") || p.getAttribute("role"))) return true;
+    } catch (e) {}
+    return false;
+  }
+  // 选项被选中后，页面常给它加一个状态 class（selected/active/checked…）。
+  // 分组时要把这类状态 class 忽略掉，否则一组选项会被拆成“已选 1 个 + 未选 3 个”。
+  const STATE_CLS_RE = /^(selected|active|checked|current|cur|on|off|hover|focus|focused|disabled|enabled|is-selected|is-active|is-checked|is-current|right|wrong|correct|incorrect|error|ok|done|chosen|picked|true|false|readonly|visited|marked)$/i;
+  function stableClass(el) {
+    let raw = "";
+    try {
+      raw = el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el.className || "");
+    } catch (e) {}
+    return String(raw).split(/\s+/).filter(function (t) {
+      return t && !STATE_CLS_RE.test(t);
+    }).join(" ");
+  }
+  function structuralGroups() {
+    const found = [];
+    let parents = [];
+    try { parents = deepQueryAll("div,ul,ol,dl,section,article,form,td,table"); } catch (e) { parents = []; }
+    for (let pi = 0; pi < parents.length; pi++) {
+      const p = parents[pi];
+      if (!p || !p.isConnected || !isVisible(p)) continue;
+      try {
+        if (p.closest && p.closest("nav,header,footer,aside,select,[class*=menu],[class*=nav],[class*=sidebar],[class*=breadcrumb]")) continue;
+      } catch (e) {}
+      const kids = Array.from(p.children || []);
+      if (kids.length < 2 || kids.length > 10) continue;
+      const buckets = new Map();
+      kids.forEach(function (k) {
+        if (!isVisible(k)) return;
+        if (/^(SCRIPT|STYLE|INPUT|SELECT|TEXTAREA|IFRAME|BR|HR)$/.test(k.tagName)) return;
+        const key = k.tagName + "|" + stableClass(k);
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(k);
+      });
+      buckets.forEach(function (els) {
+        if (els.length < 2 || els.length > 8) return;
+        if (els.some(function (e) { return usedControls.has(e); })) return;
+        const texts = els.map(textOf);
+        if (texts.some(function (t) { return t.length > 260; })) return;
+        const filled = texts.filter(function (t) { return t.length >= 1; });
+        if (filled.length < 2) return;
+        // 一半以上是纯数字 → 这是答题卡题号列表，不是选项
+        const numeric = filled.filter(function (t) { return /^\d{1,3}$/.test(t.trim()); }).length;
+        if (numeric * 2 >= filled.length) return;
+        // 每一项都得是“可点”的，否则只是普通列表/统计行
+        if (!els.every(clicky)) return;
+        // 一半以上是“首页/下一页/提交”这类导航词，说明不是选项
+        const navLike = filled.filter(function (t) { return NAV_WORDS.test(t.trim()); }).length;
+        if (navLike * 2 >= filled.length) return;
+        const g = makeGroup(els.map(function (e) { return { el: e }; }), "role");
+        if (!g) return;
+        // 必须有像样的题干，否则多半是工具栏/列表
+        if (norm(g.stem).length < 6) return;
+        // 题干和选项必须属于同一块区域；否则会把“顶部导航 + 下方题干”错拼成一道题
+        const stemEl = g.stem_id ? ELS[g.stem_id] : null;
+        const anc = stemEl ? lca([stemEl, p]) : null;
+        if (!anc || anc === document.body || anc === document.documentElement) return;
+        found.push({ g: g, els: els });
+      });
+    }
+    return found;
+  }
+
+  if (!groups.length) {
+    structuralGroups().forEach(function (item) {
+      groups.push(item.g);
+      item.els.forEach(function (e) { usedControls.add(e); });
+    });
+  }
+
+  // 5. 原生下拉框 <select>（选项文字在 option 里，没有可点击的控件）
+  try {
+    deepQueryAll("select").forEach(function (sel) {
+      if (!sel || !sel.isConnected || !isVisible(sel) || sel.disabled || sel.multiple) return;
+      const values = [];
+      Array.from(sel.options || []).forEach(function (o) {
+        const t = String(o.text || "").trim();
+        if (!t || o.disabled) return;
+        if (!o.value && /^(请选择|请选择…|--|—)/.test(t)) return;
+        values.push({ text: t, value: o.value, index: o.index });
+      });
+      if (values.length < 2) return;
+      const optNorm = norm(values.map(function (v) { return v.text; }).join(""));
+      let container = sel.parentElement;
+      for (let i = 0; container && container !== document.body && i < 6; i++) {
+        const extra = norm(textOf(container)).length - optNorm.length;
+        if (extra >= 4) break;
+        container = container.parentElement;
+      }
+      const stem = findStem(container || sel.parentElement, [sel]);
+      if (norm(stem.text || "").length < 4) return;
+      const stemEl = stem.el || null;
+      const anc = stemEl ? lca([stemEl, sel]) : null;
+      if (!anc || anc === document.body || anc === document.documentElement) return;
+      const selId = tag(sel);
+      groups.push({
+        qid: "q" + seq,
+        container_id: tag(container || sel.parentElement),
+        stem_id: stem.el ? tag(stem.el) : null,
+        stem_is_container: !!stem.is_container,
+        stem_has_image: !!stem.has_image,
+        stem_image_key: stem.el ? imageKey(stem.el) : "",
+        stem: stem.text || "",
+        qtype: "select",
+        options: values.map(function (v) {
+          return {
+            id: selId,
+            input_id: selId,
+            text: v.text,
+            has_image: false,
+            image_key: "",
+            checked: sel.selectedIndex === v.index,
+            index: v.index,
+            value: v.value,
+          };
+        }),
+        top: (function () {
+          try { return sel.getBoundingClientRect().top + window.scrollY; } catch (e) { return 0; }
+        })(),
+      });
+    });
+  } catch (e) {}
 
   // 按页面位置排序并去重
   const out = [];

@@ -138,7 +138,7 @@ def build_command(python: str, onedir: bool, icon: str, build_dir: str) -> list:
         "--lto=no",
         "--product-name=通用答题工具",
         "--file-description=通用网页答题工具（内容匹配版）",
-        "--file-version=1.0.0",
+        "--file-version=1.1.0",
     ]
     for m in NO_FOLLOW:
         cmd.append("--nofollow-import-to=%s" % m)

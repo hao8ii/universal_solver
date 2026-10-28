@@ -163,6 +163,163 @@ document.querySelectorAll('[role=checkbox]').forEach(function(el){
 <button onclick="document.body.innerHTML='<h2>已提交</h2>'">提交</button>
 """
             self._send(_page(body))
+        elif path == "/divopt":
+            # 纯 div 选项，class 名不含 opt/option/choice 等关键词 → 只能靠结构识别
+            body = """
+<h2>纯 div 选项</h2>
+<div class="q-card">
+  <div class="q-text">1. 全面依法治国要坚持什么？</div>
+  <div class="list">
+    <div class="item" style="cursor:pointer">D. 仅依靠道德教化</div>
+    <div class="item" style="cursor:pointer">A. 坚持依法治国和以德治国相结合</div>
+    <div class="item" style="cursor:pointer">C. 只依靠群众运动</div>
+    <div class="item" style="cursor:pointer">B. 放弃党的领导</div>
+  </div>
+</div>
+"""
+            script = """
+document.querySelectorAll('.item').forEach(function(el){
+  el.addEventListener('click', function(){
+    el.parentElement.querySelectorAll('.item').forEach(function(x){x.classList.remove('selected')});
+    el.classList.add('selected');
+  });
+});
+"""
+            self._send(_page(body, script))
+        elif path == "/anchors":
+            # 选项是 <a>，同样没有任何标准控件
+            body = """
+<h2>链接型选项</h2>
+<div class="question">
+  <div class="question-stem">1. 全面依法治国要坚持什么？</div>
+  <div class="opts">
+    <a class="ans" href="javascript:void(0)">D. 仅依靠道德教化</a>
+    <a class="ans" href="javascript:void(0)">A. 坚持依法治国和以德治国相结合</a>
+    <a class="ans" href="javascript:void(0)">C. 只依靠群众运动</a>
+    <a class="ans" href="javascript:void(0)">B. 放弃党的领导</a>
+  </div>
+</div>
+"""
+            script = """
+document.querySelectorAll('.ans').forEach(function(el){
+  el.addEventListener('click', function(e){
+    e.preventDefault();
+    el.parentElement.querySelectorAll('.ans').forEach(function(x){x.classList.remove('active')});
+    el.classList.add('active');
+  });
+});
+"""
+            self._send(_page(body, script))
+        elif path == "/select":
+            # 原生下拉框
+            body = """
+<h2>下拉框选项</h2>
+<div class="question">
+  <div class="question-stem">1. 全面依法治国要坚持什么？</div>
+  <select id="ans-sel">
+    <option value="">请选择</option>
+    <option value="D">D. 仅依靠道德教化</option>
+    <option value="A">A. 坚持依法治国和以德治国相结合</option>
+    <option value="C">C. 只依靠群众运动</option>
+    <option value="B">B. 放弃党的领导</option>
+  </select>
+</div>
+"""
+            self._send(_page(body))
+        elif path == "/noise":
+            # 顶部导航 + 纯 div 题干，验证不会把导航当成选项
+            body = """
+<div class="topbar">
+  <div class="menu-item">首页</div>
+  <div class="menu-item">课程中心</div>
+  <div class="menu-item">我的学习</div>
+</div>
+<div class="q-card">
+  <div class="q-text">1. 全面依法治国要坚持什么？</div>
+  <div class="list">
+    <div class="item" style="cursor:pointer">D. 仅依靠道德教化</div>
+    <div class="item" style="cursor:pointer">A. 坚持依法治国和以德治国相结合</div>
+    <div class="item" style="cursor:pointer">C. 只依靠群众运动</div>
+    <div class="item" style="cursor:pointer">B. 放弃党的领导</div>
+  </div>
+</div>
+"""
+            script = """
+document.querySelectorAll('.item').forEach(function(el){
+  el.addEventListener('click', function(){
+    el.parentElement.querySelectorAll('.item').forEach(function(x){x.classList.remove('selected')});
+    el.classList.add('selected');
+  });
+});
+"""
+            self._send(_page(body, script))
+        elif path == "/card":
+            # 一题一页、只有右侧答题卡（纯数字题号），没有“下一题”按钮
+            body = """
+<h2>答题卡跳题</h2>
+<div class="wrap" style="display:flex;gap:24px">
+  <div class="q-card" style="flex:1">
+    <div class="q-text" id="stem"></div>
+    <div class="list" id="opts"></div>
+  </div>
+  <div class="sheet" id="sheet" style="display:flex;gap:8px">
+    <div class="no" data-no="1" style="cursor:pointer;padding:6px 10px;border:1px solid #999">1</div>
+    <div class="no" data-no="2" style="cursor:pointer;padding:6px 10px;border:1px solid #999">2</div>
+    <div class="no" data-no="3" style="cursor:pointer;padding:6px 10px;border:1px solid #999">3</div>
+  </div>
+</div>
+"""
+            script = """
+const QS = [
+  {stem:'1. 全面依法治国要坚持什么？', opts:['D. 仅依靠道德教化','A. 坚持依法治国和以德治国相结合','C. 只依靠群众运动','B. 放弃党的领导']},
+  {stem:'2. 下列哪些属于全面依法治国的要求？', opts:['A. 科学立法','C. 只强调效率','B. 严格执法','D. 全民守法']},
+  {stem:'3. 依法治国是党领导人民治理国家的基本方略。', opts:['B. 错误','A. 正确']}
+];
+let cur = 1;
+const done = {};
+function paint(){
+  document.querySelectorAll('.no').forEach(function(el){
+    const n = parseInt(el.getAttribute('data-no'), 10);
+    el.classList.toggle('no-current', n === cur);
+    el.classList.toggle('no-done', !!done[n]);
+  });
+}
+function render(n){
+  cur = n;
+  const q = QS[n-1];
+  document.getElementById('stem').textContent = q.stem;
+  const box = document.getElementById('opts');
+  box.innerHTML = '';
+  q.opts.forEach(function(t){
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.style.cursor = 'pointer';
+    d.textContent = t;
+    d.addEventListener('click', function(){
+      d.classList.add('selected');
+      done[n] = true;
+      paint();
+    });
+    box.appendChild(d);
+  });
+  paint();
+}
+document.querySelectorAll('.no').forEach(function(el){
+  el.addEventListener('click', function(){ render(parseInt(el.getAttribute('data-no'), 10)); });
+});
+render(1);
+"""
+            self._send(_page(body, script))
+        elif path == "/entry":
+            # 非登录的入场页：填姓名 → 进入考试
+            body = """
+<h2>入场</h2>
+<div>
+  <input type="text" id="in-name" placeholder="请输入姓名">
+  <button id="btn-start" onclick="location.href='/quiz'">进入考试</button>
+</div>
+"""
+            self._send(_page(body))
         elif path == "/login_step":
             body = """
 <h2>分步登录 1</h2>
