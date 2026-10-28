@@ -73,8 +73,13 @@ jobs:
           path: build/通用答题工具.exe
           if-no-files-found: error
 
+      # 中文文件名经过 GitHub 资产接口会被改成 default.exe，
+      # 这里另存一份纯英文名用于 Release，产物里仍保留中文名。
+      - name: 准备发布文件名
+        run: python -c "import glob, shutil; src = [p for p in glob.glob('build/*.exe') if not p.endswith('UniversalAnswerTool.exe')]; assert src, 'exe not found'; shutil.copy2(src[0], 'build/UniversalAnswerTool.exe')"
+
       - name: 发布Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/通用答题工具.exe
+          files: build/UniversalAnswerTool.exe
